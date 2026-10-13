@@ -1,6 +1,7 @@
 # ========================================================
-# Nima Movie API - Baiscope.lk (Working Version)
+# Nima Movie API - Baiscope.lk
 # Author: Nima
+# Deploy: Railway / Render
 # ========================================================
 
 from flask import Flask, request, jsonify
@@ -28,6 +29,12 @@ API_KEYS = {
         "rate_limit": 60,
         "daily_limit": 5000,
         "tier": "premium"
+    },
+    "chama_api_88c183708c1971f39f2d2a25fbee7d8f": {
+        "name": "Chama API",
+        "rate_limit": 30,
+        "daily_limit": 2000,
+        "tier": "standard"
     }
 }
 
@@ -48,6 +55,9 @@ CACHE_TTL = 300
 RATE_WINDOW = 60
 
 
+# ========================================================
+# HELPERS
+# ========================================================
 def cache_get(key):
     entry = cache_store.get(key)
     if not entry:
@@ -100,8 +110,8 @@ def require_api_key(f):
     return wrapper
 
 
-def fetch_with_browser(url, wait_ms=5000):
-    """Fetch HTML using Playwright — bypasses Cloudflare + JS rendering."""
+def fetch_with_browser(url, wait_ms=5000, scroll=True):
+    """Fetch HTML using Playwright with auto-scroll for lazy-loaded content."""
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -118,6 +128,31 @@ def fetch_with_browser(url, wait_ms=5000):
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(wait_ms)
+
+            # Auto-scroll to trigger lazy loading
+            if scroll:
+                page.evaluate("""
+                    async () => {
+                        await new Promise((resolve) => {
+                            let totalHeight = 0;
+                            const distance = 400;
+                            const timer = setInterval(() => {
+                                const scrollHeight = document.body.scrollHeight;
+                                window.scrollBy(0, distance);
+                                totalHeight += distance;
+
+                                if (totalHeight >= scrollHeight || totalHeight > 30000) {
+                                    clearInterval(timer);
+                                    resolve();
+                                }
+                            }, 250);
+                        });
+                    }
+                """)
+                page.wait_for_timeout(3000)
+                page.evaluate("window.scrollTo(0, 0)")
+                page.wait_for_timeout(1000)
+
             html = page.content()
         finally:
             browser.close()
@@ -142,7 +177,6 @@ def parse_size_mb(size_str):
 
 
 def extract_drive_id(href):
-    """Extract Google Drive file ID from various URL formats."""
     if not href:
         return None
     m1 = re.search(r"/file/d/([a-zA-Z0-9_-]+)", href)
@@ -165,7 +199,7 @@ def home():
     return jsonify({
         "status": "ok",
         "name": "Nima Movie API",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "source": BASE_URL,
         "endpoints": {
             "search": "/api/search?q=movie+name&api_key=YOUR_KEY",
@@ -217,84 +251,54 @@ def search():
 
     try:
         search_url = f"{BASE_URL}/?s={quote(query)}"
-        html = fetch_with_browser(search_url)
+        html = fetch_with_browser(search_url, scroll=False)
         soup = BeautifulSoup(html, "html.parser")
 
         results = []
         seen_urls = set()
 
-        # Try multiple selector patterns — Baiscope uses various WP themes
-        selectors = [
-            "article.item",
-            "article",
-            ".result-item",
-            ".movie-item",
-            ".item-box",
-            ".post-item",
-            ".entry-item",
-            ".owl-item",
-            ".module-item",
-            ".post",
-        ]
-
-        for selector in selectors:
-            items = soup.select(selector)
-            if not items:
+        # Baiscope uses .post-card
+        for item in soup.select(".post-card, article, .result-item, .item-box"):
+            link_el = item.find("a", href=True)
+            if not link_el:
+                continue
+            link = link_el["href"]
+            if not link.startswith("http"):
+                link = urljoin(BASE_URL, link)
+            if link in seen_urls or "baiscope" not in link:
                 continue
 
-            for item in items:
-                link_el = item.find("a", href=True)
-                if not link_el:
-                    continue
-                link = link_el["href"]
-                if not link.startswith("http"):
-                    link = urljoin(BASE_URL, link)
-                if link in seen_urls or "baiscope" not in link:
-                    continue
+            if any(x in link for x in ["/category/", "/tag/", "/page/", "/author/", "#"]):
+                continue
 
-                # Skip non-movie pages
-                if any(x in link for x in ["/category/", "/tag/", "/page/", "/author/", "#"]):
-                    continue
+            title_el = (
+                item.select_one("h3")
+                or item.select_one("h2")
+                or item.select_one(".entry-title a")
+                or item.select_one(".title a")
+                or link_el
+            )
+            title = title_el.get_text(strip=True) if title_el else ""
 
-                title_el = (
-                    item.select_one(".entry-title a")
-                    or item.select_one("h2 a")
-                    or item.select_one("h3 a")
-                    or item.select_one(".title a")
-                    or item.select_one(".item-desc-title")
-                    or item.select_one("h2")
-                    or item.select_one("h3")
-                    or link_el
-                )
-                title = title_el.get_text(strip=True) if title_el else ""
+            if not title or len(title) < 3:
+                continue
 
-                if not title or len(title) < 3:
-                    continue
+            img_el = item.find("img")
+            poster = ""
+            if img_el:
+                poster = img_el.get("src") or img_el.get("data-src") or ""
 
-                img_el = item.find("img")
-                poster = ""
-                if img_el:
-                    poster = img_el.get("src") or img_el.get("data-src") or img_el.get("data-lazy-src") or ""
+            text = item.get_text(" ", strip=True)
+            year_m = re.search(r"\b(19|20)\d{2}\b", text)
+            year = year_m.group(0) if year_m else "N/A"
 
-                text = item.get_text(" ", strip=True)
-                year_m = re.search(r"\b(19|20)\d{2}\b", text)
-                year = year_m.group(0) if year_m else "N/A"
-
-                rating_el = item.select_one(".rating, .imdb-score, .vote")
-                rating = rating_el.get_text(strip=True) if rating_el else "N/A"
-                rating = re.sub(r"[^\d.]", "", rating) or "N/A"
-
-                seen_urls.add(link)
-                results.append({
-                    "title": title,
-                    "year": year,
-                    "rating": rating,
-                    "poster": poster,
-                    "url": link
-                })
-
-            if results:
-                break
+            seen_urls.add(link)
+            results.append({
+                "title": title,
+                "year": year,
+                "poster": poster,
+                "url": link
+            })
 
         response = {
             "success": True,
@@ -326,7 +330,7 @@ def movie():
         return jsonify(cached)
 
     try:
-        html = fetch_with_browser(movie_url)
+        html = fetch_with_browser(movie_url, scroll=True)
         soup = BeautifulSoup(html, "html.parser")
 
         # ---- TITLE ----
@@ -346,9 +350,6 @@ def movie():
 
         if not title and soup.title and soup.title.string:
             title = soup.title.string.split("|")[0].strip()
-
-        if title and "baiscope" in title.lower():
-            title = re.split(r"\s*[-–|]\s*", title)[0].strip()
 
         if not title:
             title = "N/A"
@@ -380,23 +381,40 @@ def movie():
         if m:
             rating = m.group(1)
 
-        # ---- DOWNLOAD LINKS (Google Drive) ----
+        # ---- DOWNLOAD LINKS ----
+        # Collect Google Drive AND other hosts
         download_links = []
         seen = set()
 
+        host_patterns = [
+            ("Google Drive", re.compile(r"drive\.google\.com|drive\.usercontent\.google\.com")),
+            ("Mega", re.compile(r"mega\.nz")),
+            ("PixelDrain", re.compile(r"pixeldrain\.com")),
+            ("MediaFire", re.compile(r"mediafire\.com")),
+            ("Dropbox", re.compile(r"dropbox\.com")),
+            ("1Fichier", re.compile(r"1fichier\.com")),
+            ("Direct MP4", re.compile(r"\.mp4(\?|$)")),
+            ("Direct MKV", re.compile(r"\.mkv(\?|$)")),
+        ]
+
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            if "drive.google.com" not in href and "drive.usercontent" not in href:
+            label = a.get_text(" ", strip=True)
+
+            host_name = None
+            for name, pattern in host_patterns:
+                if pattern.search(href):
+                    host_name = name
+                    break
+
+            if not host_name:
                 continue
+
             if href in seen:
                 continue
             seen.add(href)
 
-            label = a.get_text(" ", strip=True)
-
             fid = extract_drive_id(href)
-            if not fid:
-                continue
 
             qm = re.search(r"\b(\d{3,4}p|4K|2160p)\b", label, re.IGNORECASE)
             quality = qm.group(0).upper() if qm else "Download"
@@ -407,16 +425,26 @@ def movie():
             size_mb = parse_size_mb(size)
             is_hevc = any(x in label.lower() for x in ["hevc", "x265", "h265"])
 
-            download_links.append({
+            entry = {
+                "host": host_name,
                 "quality": quality,
                 "size": size,
                 "sizeMB": size_mb,
                 "isHEVC": is_hevc,
                 "codec": "HEVC" if is_hevc else "H.264",
                 "label": label[:150],
-                "url": href,
-                "directUrl": f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t"
-            })
+                "url": href
+            }
+
+            if fid:
+                entry["directUrl"] = (
+                    f"https://drive.usercontent.google.com/download"
+                    f"?id={fid}&export=download&confirm=t"
+                )
+            else:
+                entry["directUrl"] = href
+
+            download_links.append(entry)
 
         # Sort — smallest first
         download_links.sort(key=lambda x: x["sizeMB"] or 999999)
@@ -442,7 +470,7 @@ def movie():
 
 
 # ========================================================
-# 3. DEBUG — page structure analysis
+# 3. DEBUG
 # ========================================================
 @app.route("/api/debug")
 def debug():
@@ -451,10 +479,9 @@ def debug():
         return jsonify({"error": 'Parameter "url" is required'}), 400
 
     try:
-        html = fetch_with_browser(url)
+        html = fetch_with_browser(url, scroll=True)
         soup = BeautifulSoup(html, "html.parser")
 
-        # Page titles
         meta_title = ""
         og = soup.find("meta", property="og:title")
         if og and og.get("content"):
@@ -465,44 +492,39 @@ def debug():
         if h1_el:
             h1_title = h1_el.get_text(strip=True)
 
-        # Google Drive links
-        gdrive = []
+        # All download-like links
+        all_links = []
         for a in soup.find_all("a", href=True):
             h = a["href"]
-            if "drive.google.com" in h:
-                gdrive.append({
-                    "text": a.get_text(strip=True)[:120],
+            text = a.get_text(" ", strip=True)
+            if not text and not h:
+                continue
+            if any(x in h for x in [
+                "drive.google", "mega.nz", "pixeldrain", "mediafire",
+                "dropbox", "1fichier", "/download", "/links/", ".mp4", ".mkv"
+            ]):
+                all_links.append({
+                    "text": text[:120],
                     "href": h[:250],
                     "parent_class": " ".join(a.parent.get("class", [])) if a.parent else ""
                 })
 
-        # Top CSS classes (frequency)
         class_counter = {}
         for tag in soup.find_all(class_=True):
             for c in tag.get("class", []):
                 class_counter[c] = class_counter.get(c, 0) + 1
-        top_classes = sorted(class_counter.items(), key=lambda x: -x[1])[:40]
-
-        # Sample article HTML
-        samples = []
-        for sel in ["article", ".item", ".movie-item", ".result-item"]:
-            first = soup.select_one(sel)
-            if first:
-                samples.append({
-                    "selector": sel,
-                    "html": str(first)[:600]
-                })
+        top_classes = sorted(class_counter.items(), key=lambda x: -x[1])[:30]
 
         return jsonify({
             "success": True,
             "url": url,
+            "content_length": len(html),
             "page_title_meta": meta_title,
             "page_title_h1": h1_title,
             "page_title_tag": soup.title.string if soup.title else "",
-            "gdrive_count": len(gdrive),
-            "gdrive_links": gdrive[:15],
-            "top_classes": top_classes,
-            "sample_html": samples
+            "download_links_count": len(all_links),
+            "download_links": all_links[:20],
+            "top_classes": top_classes
         })
 
     except Exception as e:
@@ -510,7 +532,7 @@ def debug():
 
 
 # ========================================================
-# 4. DEBUG SEARCH — analyze search page
+# 4. DEBUG SEARCH
 # ========================================================
 @app.route("/api/debug/search")
 def debug_search():
@@ -518,19 +540,17 @@ def debug_search():
 
     try:
         search_url = f"{BASE_URL}/?s={quote(query)}"
-        html = fetch_with_browser(search_url)
+        html = fetch_with_browser(search_url, scroll=False)
         soup = BeautifulSoup(html, "html.parser")
 
-        # Top classes
         class_counter = {}
         for tag in soup.find_all(class_=True):
             for c in tag.get("class", []):
                 class_counter[c] = class_counter.get(c, 0) + 1
-        top_classes = sorted(class_counter.items(), key=lambda x: -x[1])[:40]
+        top_classes = sorted(class_counter.items(), key=lambda x: -x[1])[:30]
 
-        # Sample anchor elements
         all_links = []
-        for a in soup.find_all("a", href=True)[:40]:
+        for a in soup.find_all("a", href=True):
             href = a["href"]
             text = a.get_text(strip=True)
             if not text or len(text) < 3:
@@ -543,25 +563,13 @@ def debug_search():
                 "parent_class": " ".join(a.parent.get("class", [])) if a.parent else ""
             })
 
-        # Sample article HTML
-        samples = []
-        for sel in ["article", ".item", ".movie-item", ".result-item", ".item-box", ".post"]:
-            first = soup.select_one(sel)
-            if first:
-                samples.append({
-                    "selector": sel,
-                    "html": str(first)[:800]
-                })
-
         return jsonify({
             "success": True,
             "query": query,
             "search_url": search_url,
             "content_length": len(html),
             "top_classes": top_classes,
-            "all_links_count": len(all_links),
-            "sample_links": all_links[:20],
-            "sample_html": samples
+            "sample_links": all_links[:25]
         })
 
     except Exception as e:
