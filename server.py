@@ -1,7 +1,5 @@
 # ========================================================
 # Premium Sinhalasub.lk API
-# Author: Nima
-# Deploy: Railway (Docker)
 # ========================================================
 
 from flask import Flask, request, jsonify
@@ -72,8 +70,7 @@ def cache_set(key, data):
 
 def check_rate_limit(api_key, limit):
     now = time.time()
-    timestamps = rate_store[api_key]
-    rate_store[api_key] = [t for t in timestamps if now - t < RATE_WINDOW]
+    rate_store[api_key] = [t for t in rate_store[api_key] if now - t < RATE_WINDOW]
     if len(rate_store[api_key]) >= limit:
         return False
     rate_store[api_key].append(now)
@@ -96,36 +93,15 @@ def require_api_key(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         api_key = request.args.get("api_key") or request.headers.get("X-API-Key")
-
         if not api_key:
-            return jsonify({
-                "success": False,
-                "error": "API key required",
-                "hint": "Add ?api_key=YOUR_KEY to the request"
-            }), 401
-
+            return jsonify({"success": False, "error": "API key required"}), 401
         if api_key not in API_KEYS:
-            return jsonify({
-                "success": False,
-                "error": "Invalid API key"
-            }), 403
-
-        key_info = API_KEYS[api_key]
-
-        if not check_rate_limit(api_key, key_info["rate_limit"]):
-            return jsonify({
-                "success": False,
-                "error": "Rate limit exceeded",
-                "limit": f"{key_info['rate_limit']} requests/minute"
-            }), 429
-
-        if not check_daily_limit(api_key, key_info["daily_limit"]):
-            return jsonify({
-                "success": False,
-                "error": "Daily limit exceeded",
-                "limit": key_info["daily_limit"]
-            }), 429
-
+            return jsonify({"success": False, "error": "Invalid API key"}), 403
+        info = API_KEYS[api_key]
+        if not check_rate_limit(api_key, info["rate_limit"]):
+            return jsonify({"success": False, "error": "Rate limit exceeded"}), 429
+        if not check_daily_limit(api_key, info["daily_limit"]):
+            return jsonify({"success": False, "error": "Daily limit exceeded"}), 429
         return f(*args, **kwargs)
     return wrapper
 
@@ -154,7 +130,7 @@ def fetch_with_browser(url, wait_ms=4000):
 
 
 # ========================================================
-# HEALTH / ROOT
+# HOME
 # ========================================================
 @app.route("/")
 def home():
@@ -166,10 +142,10 @@ def home():
         "endpoints": {
             "search": "/api/search?q=movie+name&api_key=YOUR_KEY",
             "movie": "/api/movie?url=movie_page_url&api_key=YOUR_KEY",
+            "resolve": "/api/resolve?url=sinhalasub_links_url&api_key=YOUR_KEY",
             "debug": "/api/debug?url=movie_page_url",
             "stats": "/api/stats?api_key=YOUR_KEY"
-        },
-        "note": "All endpoints require valid API key (except /api/debug)"
+        }
     })
 
 
@@ -222,12 +198,11 @@ def search():
 
         selectors = [
             "article.item",
+            ".module-item",
+            ".owl-item",
             "article",
             ".result-item",
-            ".movie-item",
             ".item-box",
-            ".post-item",
-            ".entry-item",
         ]
 
         for selector in selectors:
@@ -289,19 +264,14 @@ def search():
             "data": results[:20]
         }
         cache_set(cache_key, response)
-
         return jsonify(response)
 
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "hint": "Playwright browser error"
-        }), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ========================================================
-# 2. MOVIE DETAILS
+# 2. MOVIE — FIXED (uses .link-opt + .quality)
 # ========================================================
 @app.route("/api/movie")
 @require_api_key
@@ -320,22 +290,33 @@ def movie():
         html = fetch_with_browser(movie_url)
         soup = BeautifulSoup(html, "html.parser")
 
-        # Title
+        # ---- TITLE ----
         title = ""
         og = soup.find("meta", property="og:title")
         if og and og.get("content"):
             title = og["content"].strip()
-        if not title:
-            t_el = (
-                soup.select_one("h1.entry-title")
-                or soup.select_one(".entry-header h1")
-                or soup.select_one("h1")
-            )
-            title = t_el.get_text(strip=True) if t_el else "N/A"
-        title = re.sub(r"\s*[-–|]\s*Sinhalasub.*$", "", title, flags=re.IGNORECASE).strip()
-        title = re.sub(r"\s*[-–|]\s*Sinhala Sub.*$", "", title, flags=re.IGNORECASE).strip()
 
-        # Poster
+        if not title or title == "N/A":
+            for sel in ["h1.entry-title", "h1.post-title", ".entry-header h1", "article h1", "h1"]:
+                el = soup.select_one(sel)
+                if el:
+                    t = el.get_text(strip=True)
+                    if t:
+                        title = t
+                        break
+
+        if not title or title == "N/A":
+            if soup.title and soup.title.string:
+                title = soup.title.string.split("|")[0].strip()
+
+        # Cleanup: only remove pipe-suffix if it contains "Sinhalasub"
+        if title and ("sinhalasub" in title.lower() or "sinhala sub" in title.lower()):
+            title = re.split(r"\s*\|\s*", title)[0].strip()
+
+        if not title:
+            title = "N/A"
+
+        # ---- POSTER ----
         poster = ""
         ogi = soup.find("meta", property="og:image")
         if ogi and ogi.get("content"):
@@ -345,80 +326,97 @@ def movie():
             if p_el:
                 poster = p_el.get("src") or p_el.get("data-src") or ""
 
-        # Description
+        # ---- DESCRIPTION ----
         desc = ""
         ogd = soup.find("meta", property="og:description")
         if ogd and ogd.get("content"):
             desc = ogd["content"].strip()[:500]
-        else:
-            d_el = soup.select_one(".entry-content p, .description")
-            if d_el:
-                desc = d_el.get_text(strip=True)[:500]
 
-        # Year
+        # ---- YEAR ----
         year_m = re.search(r"\b(19|20)\d{2}\b", movie_url) or re.search(r"\b(19|20)\d{2}\b", title)
         year = year_m.group(0) if year_m else "N/A"
 
-        # Rating
+        # ---- RATING ----
         rating = "N/A"
-        r_el = soup.select_one(".imdb-score, .imdb-rating-badge, .rating")
-        if r_el:
-            m = re.search(r"(\d+\.\d+)", r_el.get_text(strip=True))
-            if m:
-                rating = m.group(1)
-        if rating == "N/A":
-            full = soup.get_text(" ", strip=True)
-            m = re.search(r"IMDb[:\s]*([\d]+\.[\d]+)", full)
-            if m:
-                rating = m.group(1)
+        full = soup.get_text(" ", strip=True)
+        m = re.search(r"IMDb[:\s]*([\d]+\.[\d]+)", full)
+        if m:
+            rating = m.group(1)
 
-        # Download links
+        # ---- DOWNLOAD LINKS ----
+        # Structure: .link-opt > a[href="/links/xxx/"] (text = server name)
+        # quality is in .quality sibling
         download_links = []
         seen = set()
 
-        link_pattern = re.compile(
-            r"(drive\.google|mega\.nz|pixeldrain|hubcloud|workers\.dev|"
-            r"gdflix|katdrive|kolop|1fichier|mediafire|dropbox|"
-            r"sinhalasub\.lk/links|sinhalasub\.net/links|\.mp4|\.mkv)",
-            re.IGNORECASE
-        )
-        quality_re = re.compile(r"\b(\d{3,4}p|4K|2160p|720p|1080p|480p)\b", re.IGNORECASE)
-        size_re = re.compile(r"(\d+(?:\.\d+)?\s*(?:MB|GB|KB))", re.IGNORECASE)
-
-        candidate_anchors = (
-            soup.select("a.button, a.dl-btn, a.download, .dl_links a, .download-links a")
-            or soup.find_all("a", href=True)
-        )
-
-        for a in candidate_anchors:
-            href = a.get("href", "").strip()
-            label = a.get_text(" ", strip=True)
+        for lo in soup.select(".link-opt"):
+            a_el = lo.find("a", href=True)
+            if not a_el:
+                continue
+            href = a_el["href"].strip()
+            server_name = a_el.get_text(" ", strip=True)
 
             if not href or href in seen:
                 continue
             if href.startswith("#") or href.startswith("javascript:"):
                 continue
 
-            if not link_pattern.search(href) and not link_pattern.search(label):
-                continue
+            if not href.startswith("http"):
+                href = urljoin(BASE_URL, href)
 
             seen.add(href)
 
-            q_match = quality_re.search(label) or quality_re.search(href)
-            quality = q_match.group(0).upper() if q_match else "Download"
+            # Find quality inside the same .link-opt parent
+            quality_el = lo.select_one(".quality")
+            quality = quality_el.get_text(" ", strip=True) if quality_el else ""
 
-            s_match = size_re.search(label)
-            size = s_match.group(1).strip() if s_match else ""
+            # If quality not found, try parent/sibling
+            if not quality:
+                parent = lo.parent
+                if parent:
+                    q2 = parent.select_one(".quality")
+                    if q2:
+                        quality = q2.get_text(" ", strip=True)
+
+            # Clean quality
+            quality = re.sub(r"\s+", " ", quality).strip()
+            if not quality:
+                # Try extracting from server_name
+                qm = re.search(r"\b(\d{3,4}p|4K|2160p)\b", server_name, re.IGNORECASE)
+                quality = qm.group(0).upper() if qm else "Download"
+
+            # Size from server_name or quality text
+            size = ""
+            sm = re.search(r"(\d+(?:\.\d+)?\s*(?:MB|GB|KB))", server_name + " " + quality, re.IGNORECASE)
+            if sm:
+                size = sm.group(1).strip()
 
             download_links.append({
+                "server": server_name or "Unknown",
                 "quality": quality,
                 "size": size,
-                "label": label[:120] or quality,
+                "label": f"{server_name} • {quality}".strip(" •"),
                 "url": href
             })
 
-        order = {"4K": 0, "2160P": 1, "1440P": 2, "1080P": 3, "720P": 4, "480P": 5, "360P": 6}
-        download_links.sort(key=lambda x: order.get(x["quality"], 99))
+        # Fallback if no .link-opt found
+        if not download_links:
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if "/links/" not in href:
+                    continue
+                if href in seen:
+                    continue
+                seen.add(href)
+                if not href.startswith("http"):
+                    href = urljoin(BASE_URL, href)
+                download_links.append({
+                    "server": a.get_text(strip=True) or "Download",
+                    "quality": "Download",
+                    "size": "",
+                    "label": a.get_text(strip=True)[:80],
+                    "url": href
+                })
 
         response = {
             "success": True,
@@ -434,7 +432,6 @@ def movie():
             }
         }
         cache_set(cache_key, response)
-
         return jsonify(response)
 
     except Exception as e:
@@ -442,7 +439,71 @@ def movie():
 
 
 # ========================================================
-# 3. DEBUG ENDPOINT — Analyze HTML structure (no API key)
+# 3. RESOLVE — sinhalasub.lk/links/xxx/ → real URL
+# ========================================================
+@app.route("/api/resolve")
+@require_api_key
+def resolve():
+    src = request.args.get("url")
+    if not src:
+        return jsonify({"success": False, "error": 'Parameter "url" is required'}), 400
+
+    cache_key = f"resolve:{src}"
+    cached = cache_get(cache_key)
+    if cached:
+        cached["cached"] = True
+        return jsonify(cached)
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--single-process",
+                    "--no-zygote",
+                ]
+            )
+            page = browser.new_page(user_agent=HEADERS["User-Agent"])
+            final_url = src
+            try:
+                page.goto(src, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(5000)
+                final_url = page.url
+                html = page.content()
+            finally:
+                browser.close()
+
+        # Try to find direct link in resolved HTML too
+        soup = BeautifulSoup(html, "html.parser")
+        direct = None
+        for a in soup.find_all("a", href=True):
+            h = a["href"]
+            if any(x in h for x in ["pixeldrain.com", "drive.google.com", "mega.nz", ".mp4", ".mkv"]):
+                direct = h
+                break
+
+        result = {
+            "success": True,
+            "cached": False,
+            "data": {
+                "source": src,
+                "finalUrl": final_url,
+                "directLink": direct or final_url
+            }
+        }
+        cache_set(cache_key, result)
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ========================================================
+# 4. DEBUG
 # ========================================================
 @app.route("/api/debug")
 def debug():
@@ -454,7 +515,6 @@ def debug():
         html = fetch_with_browser(url)
         soup = BeautifulSoup(html, "html.parser")
 
-        # 1. Page title (from meta + h1)
         meta_title = ""
         og = soup.find("meta", property="og:title")
         if og and og.get("content"):
@@ -465,38 +525,17 @@ def debug():
         if h1_el:
             h1_title = h1_el.get_text(strip=True)
 
-        # 2. All links with download-like patterns
-        candidate_links = []
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            label = a.get_text(" ", strip=True)
-            parent_class = " ".join(a.parent.get("class", [])) if a.parent else ""
-            own_class = " ".join(a.get("class", []))
-
-            if any(x in href for x in ["/links/", "/dl/", "download", "pixeldrain", "drive.google", "mega.nz", ".mp4", ".mkv"]):
-                candidate_links.append({
-                    "text": label[:100],
-                    "href": href[:150],
-                    "class": own_class,
-                    "parent_class": parent_class[:80]
-                })
-
-        # 3. All button-like elements
-        buttons = []
-        for el in soup.select(".button, .btn, a.button, a.btn, .download-button, .dl-btn"):
-            buttons.append({
-                "tag": el.name,
-                "text": el.get_text(" ", strip=True)[:80],
-                "href": (el.get("href") or "")[:150],
-                "class": " ".join(el.get("class", []))
+        # Sample of .link-opt structure
+        link_opts = []
+        for lo in soup.select(".link-opt")[:5]:
+            a_el = lo.find("a", href=True)
+            q_el = lo.select_one(".quality")
+            link_opts.append({
+                "outer_html": str(lo)[:500],
+                "server_name": a_el.get_text(strip=True) if a_el else "",
+                "href": (a_el["href"] if a_el else "")[:150],
+                "quality_text": q_el.get_text(strip=True) if q_el else ""
             })
-
-        # 4. All unique classes (top 30)
-        class_counter = {}
-        for tag in soup.find_all(class_=True):
-            for cls in tag.get("class", []):
-                class_counter[cls] = class_counter.get(cls, 0) + 1
-        top_classes = sorted(class_counter.items(), key=lambda x: -x[1])[:30]
 
         return jsonify({
             "success": True,
@@ -504,11 +543,8 @@ def debug():
             "page_title_meta": meta_title,
             "page_title_h1": h1_title,
             "page_title_tag": soup.title.string if soup.title else "",
-            "candidate_links_count": len(candidate_links),
-            "candidate_links": candidate_links[:15],
-            "buttons_count": len(buttons),
-            "buttons": buttons[:10],
-            "top_classes": top_classes
+            "link_opt_count": len(soup.select(".link-opt")),
+            "link_opts_sample": link_opts
         })
 
     except Exception as e:
