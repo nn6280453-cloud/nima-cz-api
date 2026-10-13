@@ -1,12 +1,12 @@
 # ========================================================
-# Nima CZ API - CineSubz Scraper (Python)
+# Nima CZ API - CineSubz Scraper (Python + Playwright)
 # Author: Nima
-# Deploy: Railway / Render
+# Deploy: Railway
 # ========================================================
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import cloudscraper
+from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 import re
 import os
@@ -17,29 +17,28 @@ CORS(app)
 
 # ---------- CONFIG ----------
 BASE_URL = "https://cinesubz.lk"   # ✅ Updated domain
-
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
 }
 
-# Cloudscraper instance - bypasses Cloudflare
-scraper = cloudscraper.create_scraper(
-    browser={"browser": "chrome", "platform": "windows", "mobile": False},
-    delay=5
-)
 
-
-def fetch(url):
-    """Fetch HTML with Cloudflare bypass."""
-    r = scraper.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.text
+def fetch_with_browser(url):
+    """Fetch HTML using Playwright (real browser)."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        )
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        page.goto(url, wait_until="networkidle", timeout=60000)
+        page.wait_for_timeout(3000)   # wait for JS to render
+        html = page.content()
+        browser.close()
+        return html
 
 
 # ========================================================
@@ -51,47 +50,12 @@ def home():
         "status": "ok",
         "name": "Nima CZ API",
         "base_url": BASE_URL,
+        "engine": "playwright",
         "endpoints": {
             "search": "/api/search?q=movie+name",
-            "movie": "/api/movie?url=movie_page_url",
-            "debug": "/debug?q=avatar"
+            "movie": "/api/movie?url=movie_page_url"
         }
     })
-
-
-# ========================================================
-# DEBUG ENDPOINT - Remove after testing
-# ========================================================
-@app.route("/debug")
-def debug():
-    query = request.args.get("q", "avatar")
-    try:
-        search_url = f"{BASE_URL}/?s={quote(query)}"
-        r = scraper.get(search_url, headers=HEADERS, timeout=30)
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        articles = soup.find_all("article")[:3]
-        sample = []
-        for a in articles:
-            sample.append({
-                "class": a.get("class"),
-                "html_snippet": str(a)[:300]
-            })
-
-        return jsonify({
-            "url": search_url,
-            "status_code": r.status_code,
-            "content_length": len(r.text),
-            "server_header": r.headers.get("Server", "unknown"),
-            "cf_ray": r.headers.get("CF-RAY", "no cloudflare"),
-            "title_tag": soup.title.string if soup.title else "no title",
-            "is_cloudflare_challenge": "Just a moment" in r.text or "cf-browser-verification" in r.text,
-            "article_count": len(soup.find_all("article")),
-            "sample_articles": sample,
-            "first_500_chars": r.text[:500]
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 # ========================================================
@@ -106,22 +70,14 @@ def search():
 
     try:
         search_url = f"{BASE_URL}/?s={quote(query)}"
-        html = fetch(search_url)
+        html = fetch_with_browser(search_url)
         soup = BeautifulSoup(html, "html.parser")
-
-        # Check Cloudflare challenge
-        if "Just a moment" in html or "cf-browser-verification" in html:
-            return jsonify({
-                "success": False,
-                "error": "Cloudflare challenge detected",
-                "hint": "Site is blocking automated requests"
-            }), 503
 
         results = []
         seen_urls = set()
 
-        # ---- Strategy 1: DooPlay theme selectors ----
-        for item in soup.select("article.item, article, .result-item, .movie-item"):
+        # ---- CineSubz uses .module-item or .item-box for search results ----
+        for item in soup.select(".module-item, .item-box, .result-item, .movie-item, .display-item"):
             link_el = item.find("a", href=True)
             if not link_el:
                 continue
@@ -131,11 +87,10 @@ def search():
                 continue
 
             title_el = (
-                item.select_one(".details .title a")
+                item.select_one(".title a")
                 or item.select_one("h2 a")
                 or item.select_one("h3 a")
                 or item.select_one(".entry-title a")
-                or item.select_one(".title")
                 or link_el
             )
             title = title_el.get_text(strip=True) if title_el else ""
@@ -149,7 +104,7 @@ def search():
             year_match = re.search(r"\b(19|20)\d{2}\b", meta_text)
             year = year_match.group(0) if year_match else "N/A"
 
-            rating_el = item.select_one(".rating, .imdb, .vote")
+            rating_el = item.select_one(".rating, .imdb, .vote, .imdb-rating-badge")
             rating = rating_el.get_text(strip=True) if rating_el else "N/A"
 
             if title:
@@ -162,26 +117,25 @@ def search():
                     "url": link
                 })
 
-        # ---- Strategy 2: Fallback ----
+        # ---- Fallback: any <a> pointing to /movies/ or /tvshows/ ----
         if not results:
             for a in soup.find_all("a", href=True):
                 href = a["href"]
                 if BASE_URL not in href or href in seen_urls:
                     continue
+                if "/movies/" not in href and "/tvshows/" not in href:
+                    continue
                 text = a.get_text(strip=True)
-                if len(text) < 3 or len(text) > 200:
+                if len(text) < 3:
                     continue
-                if any(x in href.lower() for x in ["/category/", "/tag/", "/page/", "#", "javascript:"]):
-                    continue
-                if any(x in href.lower() for x in ["/movie", "/tv", "/series"]):
-                    seen_urls.add(href)
-                    results.append({
-                        "title": text,
-                        "year": "N/A",
-                        "rating": "N/A",
-                        "poster": "",
-                        "url": href
-                    })
+                seen_urls.add(href)
+                results.append({
+                    "title": text,
+                    "year": "N/A",
+                    "rating": "N/A",
+                    "poster": "",
+                    "url": href
+                })
 
         return jsonify({
             "success": True,
@@ -193,14 +147,13 @@ def search():
         return jsonify({
             "success": False,
             "error": str(e),
-            "hint": "Check /debug?q=avatar"
+            "hint": "Playwright browser error"
         }), 500
 
 
 # ========================================================
 # 2. MOVIE DETAILS ENDPOINT
 # GET /api/movie?url=...
-# Returns: title, poster, description + ALL quality download links
 # ========================================================
 @app.route("/api/movie")
 def movie():
@@ -209,7 +162,7 @@ def movie():
         return jsonify({"success": False, "error": 'Parameter "url" is required'}), 400
 
     try:
-        html = fetch(movie_url)
+        html = fetch_with_browser(movie_url)
         soup = BeautifulSoup(html, "html.parser")
 
         # ---- Basic info ----
@@ -272,7 +225,6 @@ def movie():
                     "url": href
                 })
 
-        # Sort: 4K → 1080p → 720p → 480p
         order = {"4K": 0, "2160P": 1, "1440P": 2, "1080P": 3, "720P": 4, "480P": 5}
         download_links.sort(key=lambda x: order.get(x["quality"], 99))
 
