@@ -1,5 +1,7 @@
 # ========================================================
 # Premium Sinhalasub.lk API
+# Author: Nima
+# Deploy: Railway (Docker)
 # ========================================================
 
 from flask import Flask, request, jsonify
@@ -137,7 +139,7 @@ def home():
     return jsonify({
         "status": "ok",
         "name": "Sinhalasub Premium API",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "base_url": BASE_URL,
         "endpoints": {
             "search": "/api/search?q=movie+name&api_key=YOUR_KEY",
@@ -271,7 +273,7 @@ def search():
 
 
 # ========================================================
-# 2. MOVIE — FIXED (uses .link-opt + .quality)
+# 2. MOVIE DETAILS
 # ========================================================
 @app.route("/api/movie")
 @require_api_key
@@ -290,7 +292,7 @@ def movie():
         html = fetch_with_browser(movie_url)
         soup = BeautifulSoup(html, "html.parser")
 
-        # ---- TITLE ----
+        # TITLE
         title = ""
         og = soup.find("meta", property="og:title")
         if og and og.get("content"):
@@ -309,14 +311,13 @@ def movie():
             if soup.title and soup.title.string:
                 title = soup.title.string.split("|")[0].strip()
 
-        # Cleanup: only remove pipe-suffix if it contains "Sinhalasub"
         if title and ("sinhalasub" in title.lower() or "sinhala sub" in title.lower()):
             title = re.split(r"\s*\|\s*", title)[0].strip()
 
         if not title:
             title = "N/A"
 
-        # ---- POSTER ----
+        # POSTER
         poster = ""
         ogi = soup.find("meta", property="og:image")
         if ogi and ogi.get("content"):
@@ -326,26 +327,24 @@ def movie():
             if p_el:
                 poster = p_el.get("src") or p_el.get("data-src") or ""
 
-        # ---- DESCRIPTION ----
+        # DESCRIPTION
         desc = ""
         ogd = soup.find("meta", property="og:description")
         if ogd and ogd.get("content"):
             desc = ogd["content"].strip()[:500]
 
-        # ---- YEAR ----
+        # YEAR
         year_m = re.search(r"\b(19|20)\d{2}\b", movie_url) or re.search(r"\b(19|20)\d{2}\b", title)
         year = year_m.group(0) if year_m else "N/A"
 
-        # ---- RATING ----
+        # RATING
         rating = "N/A"
         full = soup.get_text(" ", strip=True)
         m = re.search(r"IMDb[:\s]*([\d]+\.[\d]+)", full)
         if m:
             rating = m.group(1)
 
-        # ---- DOWNLOAD LINKS ----
-        # Structure: .link-opt > a[href="/links/xxx/"] (text = server name)
-        # quality is in .quality sibling
+        # DOWNLOAD LINKS
         download_links = []
         seen = set()
 
@@ -366,11 +365,9 @@ def movie():
 
             seen.add(href)
 
-            # Find quality inside the same .link-opt parent
             quality_el = lo.select_one(".quality")
             quality = quality_el.get_text(" ", strip=True) if quality_el else ""
 
-            # If quality not found, try parent/sibling
             if not quality:
                 parent = lo.parent
                 if parent:
@@ -378,14 +375,11 @@ def movie():
                     if q2:
                         quality = q2.get_text(" ", strip=True)
 
-            # Clean quality
             quality = re.sub(r"\s+", " ", quality).strip()
             if not quality:
-                # Try extracting from server_name
                 qm = re.search(r"\b(\d{3,4}p|4K|2160p)\b", server_name, re.IGNORECASE)
                 quality = qm.group(0).upper() if qm else "Download"
 
-            # Size from server_name or quality text
             size = ""
             sm = re.search(r"(\d+(?:\.\d+)?\s*(?:MB|GB|KB))", server_name + " " + quality, re.IGNORECASE)
             if sm:
@@ -399,7 +393,6 @@ def movie():
                 "url": href
             })
 
-        # Fallback if no .link-opt found
         if not download_links:
             for a in soup.find_all("a", href=True):
                 href = a["href"]
@@ -469,22 +462,91 @@ def resolve():
             )
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
             final_url = src
+            html = ""
+
             try:
                 page.goto(src, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(8000)
                 final_url = page.url
                 html = page.content()
+
+                # 1. Meta refresh
+                soup = BeautifulSoup(html, "html.parser")
+                meta_refresh = soup.find("meta", attrs={"http-equiv": re.compile("refresh", re.I)})
+                if meta_refresh and meta_refresh.get("content"):
+                    m = re.search(r"url=([^\s;]+)", meta_refresh["content"], re.IGNORECASE)
+                    if m:
+                        final_url = m.group(1).strip("\"'")
+
+                # 2. JS redirects
+                js_redirect = re.search(
+                    r'(?:window\.location|location\.href|location\.replace)\s*[=(]\s*["\']([^"\']+)["\']',
+                    html
+                )
+                if js_redirect:
+                    candidate = js_redirect.group(1)
+                    if candidate.startswith("http") and "sinhalasub" not in candidate:
+                        final_url = candidate
+
+                # 3. Try clicking download buttons
+                try:
+                    button_selectors = [
+                        "a.btn-primary",
+                        "a.btn-success",
+                        "a#download",
+                        "a.download-btn",
+                        "button.btn",
+                        ".link-opt a",
+                        "a[href*='pixeldrain']",
+                        "a[href*='drive.google']",
+                        "a[href*='mega.nz']",
+                    ]
+                    for sel in button_selectors:
+                        try:
+                            btn = page.query_selector(sel)
+                            if btn:
+                                with page.context.expect_page(timeout=5000) as new_page_info:
+                                    btn.click()
+                                new_page = new_page_info.value
+                                new_page.wait_for_load_state("domcontentloaded", timeout=15000)
+                                final_url = new_page.url
+                                html = new_page.content()
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                # If still on sinhalasub, wait more
+                if "sinhalasub" in final_url:
+                    page.wait_for_timeout(5000)
+                    final_url = page.url
+                    html = page.content()
+
             finally:
                 browser.close()
 
-        # Try to find direct link in resolved HTML too
+        # 4. Search HTML for direct host URLs
         soup = BeautifulSoup(html, "html.parser")
+        direct_hosts = re.compile(
+            r"(pixeldrain\.com|drive\.google\.com|mega\.nz|mediafire\.com|dropbox\.com|1fichier\.com|"
+            r"gdflix|hubcloud|workers\.dev|katdrive|kolop|files\.catbox|tmpsend|filepress)",
+            re.IGNORECASE
+        )
+
         direct = None
-        for a in soup.find_all("a", href=True):
-            h = a["href"]
-            if any(x in h for x in ["pixeldrain.com", "drive.google.com", "mega.nz", ".mp4", ".mkv"]):
-                direct = h
-                break
+
+        if direct_hosts.search(final_url):
+            direct = final_url
+        else:
+            for a in soup.find_all("a", href=True):
+                h = a["href"]
+                if direct_hosts.search(h):
+                    direct = h
+                    break
+
+        if not direct and "sinhalasub" not in final_url:
+            direct = final_url
 
         result = {
             "success": True,
@@ -492,7 +554,10 @@ def resolve():
             "data": {
                 "source": src,
                 "finalUrl": final_url,
-                "directLink": direct or final_url
+                "directLink": direct or final_url,
+                "hasDirect": bool(direct),
+                "isResolved": direct is not None and "sinhalasub" not in (direct or ""),
+                "pageTitle": soup.title.string.strip() if soup.title else ""
             }
         }
         cache_set(cache_key, result)
@@ -525,7 +590,6 @@ def debug():
         if h1_el:
             h1_title = h1_el.get_text(strip=True)
 
-        # Sample of .link-opt structure
         link_opts = []
         for lo in soup.select(".link-opt")[:5]:
             a_el = lo.find("a", href=True)
