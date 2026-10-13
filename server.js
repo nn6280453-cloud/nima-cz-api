@@ -1,7 +1,7 @@
 // ========================================================
 // Nima CZ API - CineSubz Scraper
 // Author: Nima
-// Deploy: Render
+// Deploy: Railway / Render
 // ========================================================
 
 const express = require('express');
@@ -50,7 +50,7 @@ app.get('/api/search', async (req, res) => {
 
     const results = [];
 
-    // DooPlay theme uses article.item or similar
+    // CineSubz uses DooPlay theme – adjust selectors if needed
     $('article, .result-item, .movie-item, .item').each((i, el) => {
       const $el = $(el);
       const title = $el.find('h2, h3, .title, .entry-title').first().text().trim();
@@ -176,6 +176,6 @@ app.get('/api/movie', async (req, res) => {
 
 // ---------- START SERVER ----------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Nima CZ API running on port ${PORT}`);
 });
