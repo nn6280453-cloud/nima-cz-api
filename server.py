@@ -6,11 +6,31 @@
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 import re
 import os
+import subprocess
+import sys
 from urllib.parse import quote
+
+# ---------- AUTO-INSTALL PLAYWRIGHT BROWSER AT STARTUP ----------
+def install_playwright_browser():
+    """Download Chromium browser for Playwright on startup."""
+    try:
+        print("🔧 Installing Playwright Chromium browser...")
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=False,
+            timeout=600
+        )
+        print("✅ Playwright browser installed.")
+    except Exception as e:
+        print(f"⚠️ Playwright install warning: {e}")
+
+install_playwright_browser()
+
+# Now import playwright AFTER browser install
+from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 CORS(app)
@@ -31,11 +51,16 @@ def fetch_with_browser(url):
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ]
         )
         page = browser.new_page(user_agent=HEADERS["User-Agent"])
         page.goto(url, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(3000)   # wait for JS to render
+        page.wait_for_timeout(3000)
         html = page.content()
         browser.close()
         return html
@@ -76,7 +101,7 @@ def search():
         results = []
         seen_urls = set()
 
-        # ---- CineSubz uses .module-item or .item-box for search results ----
+        # CineSubz uses .module-item or .item-box
         for item in soup.select(".module-item, .item-box, .result-item, .movie-item, .display-item"):
             link_el = item.find("a", href=True)
             if not link_el:
@@ -104,7 +129,7 @@ def search():
             year_match = re.search(r"\b(19|20)\d{2}\b", meta_text)
             year = year_match.group(0) if year_match else "N/A"
 
-            rating_el = item.select_one(".rating, .imdb, .vote, .imdb-rating-badge")
+            rating_el = item.select_one(".rating, .imdb, .vote")
             rating = rating_el.get_text(strip=True) if rating_el else "N/A"
 
             if title:
@@ -117,7 +142,7 @@ def search():
                     "url": link
                 })
 
-        # ---- Fallback: any <a> pointing to /movies/ or /tvshows/ ----
+        # Fallback
         if not results:
             for a in soup.find_all("a", href=True):
                 href = a["href"]
@@ -153,7 +178,6 @@ def search():
 
 # ========================================================
 # 2. MOVIE DETAILS ENDPOINT
-# GET /api/movie?url=...
 # ========================================================
 @app.route("/api/movie")
 def movie():
@@ -165,7 +189,6 @@ def movie():
         html = fetch_with_browser(movie_url)
         soup = BeautifulSoup(html, "html.parser")
 
-        # ---- Basic info ----
         title_el = soup.select_one("h1.entry-title, h1")
         title = title_el.get_text(strip=True) if title_el else "N/A"
 
@@ -179,7 +202,6 @@ def movie():
         desc_el = soup.select_one(".entry-content p, .description, .wp-content p")
         description = desc_el.get_text(strip=True)[:500] if desc_el else ""
 
-        # ---- Year / Rating ----
         full_text = soup.get_text(" ", strip=True)
         year_match = re.search(r"\b(19|20)\d{2}\b", full_text)
         year = year_match.group(0) if year_match else "N/A"
@@ -187,7 +209,6 @@ def movie():
         rating_match = re.search(r"IMDb[:\s]*([\d.]+)", full_text, re.IGNORECASE)
         rating = rating_match.group(1) if rating_match else "N/A"
 
-        # ---- Download links (ALL qualities) ----
         quality_pattern = re.compile(
             r"(480p|720p|1080p|1440p|2160p|4K|HD|FHD|HDTV|BluRay|WEB-?DL|WEBRip|HDRip|DVDRip|CAM)",
             re.IGNORECASE
@@ -214,7 +235,6 @@ def movie():
 
             if is_quality:
                 seen.add(href)
-
                 qmatch = quality_pattern.search(label) or quality_pattern.search(href)
                 quality = qmatch.group(0).upper() if qmatch else "Download"
                 quality = quality.replace("WEB-DL", "WEB-DL").replace("WEBRIP", "WEBRip")
