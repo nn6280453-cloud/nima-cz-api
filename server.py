@@ -16,7 +16,8 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------- CONFIG ----------
-BASE_URL = "https://cinesubz.lk"
+BASE_URL = "https://cinesubz.net"     # ✅ Movie pages මෙතන
+SEARCH_URL = "https://cinesubz.lk"    # ✅ Search form එක මෙතන වැඩ කරනවා
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -60,136 +61,9 @@ def home():
         "engine": "playwright",
         "endpoints": {
             "search": "/api/search?q=movie+name",
-            "movie": "/api/movie?url=movie_page_url",
-            "debug": "/debug?q=avatar",
-            "debughtml": "/debughtml?q=avatar"
+            "movie": "/api/movie?url=movie_page_url"
         }
     })
-
-
-# ========================================================
-# DEBUG ENDPOINT - Remove after testing
-# ========================================================
-@app.route("/debug")
-def debug():
-    query = request.args.get("q", "avatar")
-    try:
-        test_urls = [
-            f"{BASE_URL}/?s={quote(query)}",
-            f"{BASE_URL}/search?q={quote(query)}",
-            f"{BASE_URL}/search/{quote(query)}",
-            f"{BASE_URL}/find/?q={quote(query)}",
-            f"{BASE_URL}/?search={quote(query)}",
-        ]
-
-        results = []
-        for url in test_urls:
-            try:
-                html = fetch_with_browser(url)
-                soup = BeautifulSoup(html, "html.parser")
-
-                movie_links = []
-                for a in soup.find_all("a", href=True):
-                    href = a["href"]
-                    if any(x in href.lower() for x in [
-                        "/movie/", "/movies/", "/tvshow/", "/tvshows/",
-                        "/watch/", "/title/", "/series/"
-                    ]):
-                        text = a.get_text(strip=True)
-                        if text and len(text) > 2:
-                            movie_links.append({
-                                "title": text[:60],
-                                "url": href[:120]
-                            })
-
-                page_title = soup.title.string if soup.title else "no title"
-                item_count = len(soup.select(
-                    ".movie-item, .item, .card, .module-item, .poster, article"
-                ))
-
-                results.append({
-                    "url": url,
-                    "page_title": page_title,
-                    "movie_links_found": len(movie_links),
-                    "sample_links": movie_links[:5],
-                    "item_count": item_count,
-                    "content_length": len(html),
-                })
-            except Exception as e:
-                results.append({"url": url, "error": str(e)})
-
-        return jsonify({
-            "query": query,
-            "results": results
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ========================================================
-# DEBUG HTML ENDPOINT - Shows actual HTML classes
-# ========================================================
-@app.route("/debughtml")
-def debughtml():
-    query = request.args.get("q", "avatar")
-    try:
-        search_url = f"{BASE_URL}/?s={quote(query)}"
-        html = fetch_with_browser(search_url)
-        soup = BeautifulSoup(html, "html.parser")
-
-        # ---- 1. All unique CSS class names ----
-        class_counter = {}
-        for tag in soup.find_all(class_=True):
-            for cls in tag.get("class", []):
-                class_counter[cls] = class_counter.get(cls, 0) + 1
-
-        top_classes = sorted(
-            class_counter.items(), key=lambda x: -x[1]
-        )[:40]
-
-        # ---- 2. All <a> links with movie-like hrefs ----
-        movie_links = []
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if any(x in href.lower() for x in [
-                "/movie", "/tv-show", "/tvshow", "/series", "/watch", "/title"
-            ]):
-                if href.rstrip("/") in [
-                    f"{BASE_URL}/movies",
-                    f"{BASE_URL}/tvshows",
-                    f"{BASE_URL}/movies/",
-                    f"{BASE_URL}/tvshows/",
-                ]:
-                    continue
-                movie_links.append({
-                    "text": a.get_text(strip=True)[:80],
-                    "href": href,
-                    "parent_class": " ".join(a.parent.get("class", [])) if a.parent else "",
-                })
-
-        # ---- 3. Find elements with 'poster' or 'thumb' in class ----
-        poster_elements = []
-        for el in soup.find_all(class_=re.compile("poster|thumb|card|item|module", re.IGNORECASE)):
-            poster_elements.append({
-                "tag": el.name,
-                "class": " ".join(el.get("class", [])),
-                "snippet": str(el)[:200],
-            })
-
-        return jsonify({
-            "query": query,
-            "search_url": search_url,
-            "content_length": len(html),
-            "top_classes": top_classes,
-            "movie_links_count": len(movie_links),
-            "movie_links": movie_links[:15],
-            "poster_elements_count": len(poster_elements),
-            "poster_elements": poster_elements[:10],
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 # ========================================================
@@ -203,70 +77,62 @@ def search():
         return jsonify({"success": False, "error": 'Parameter "q" is required'}), 400
 
     try:
-        search_url = f"{BASE_URL}/?s={quote(query)}"
+        search_url = f"{SEARCH_URL}/?s={quote(query)}"
         html = fetch_with_browser(search_url)
         soup = BeautifulSoup(html, "html.parser")
 
         results = []
         seen_urls = set()
 
-        for item in soup.select(".module-item, .item-box, .result-item, .movie-item, .display-item"):
+        # ✅ CineSubz uses .item-box for each movie card
+        for item in soup.select(".item-box"):
             link_el = item.find("a", href=True)
             if not link_el:
                 continue
 
             link = link_el["href"]
-            if BASE_URL not in link or link in seen_urls:
+            if link in seen_urls:
                 continue
 
+            # ✅ Title is inside .item-desc-title or .item-desc-hl
             title_el = (
-                item.select_one(".title a")
-                or item.select_one("h2 a")
-                or item.select_one("h3 a")
-                or item.select_one(".entry-title a")
-                or link_el
+                item.select_one(".item-desc-title")
+                or item.select_one(".item-desc-hl")
+                or item.select_one(".item-desc")
             )
             title = title_el.get_text(strip=True) if title_el else ""
 
-            img_el = item.find("img")
+            # ✅ Poster inside .mli-thumb or .thumb img
+            img_el = item.select_one(".mli-thumb img, .thumb img, img")
             poster = ""
             if img_el:
                 poster = img_el.get("src") or img_el.get("data-src") or ""
 
-            meta_text = item.get_text(" ", strip=True)
-            year_match = re.search(r"\b(19|20)\d{2}\b", meta_text)
+            # ✅ Rating inside .imdb-score / .rating1
+            rating_el = item.select_one(".imdb-score, .rating1, .imdb-rating-badge")
+            rating = rating_el.get_text(strip=True) if rating_el else "N/A"
+            if rating and rating != "N/A":
+                rating = re.sub(r"[^\d.]", "", rating) or "N/A"
+
+            # Year from URL or title
+            year_match = re.search(r"\b(19|20)\d{2}\b", link) or re.search(
+                r"\b(19|20)\d{2}\b", title
+            )
             year = year_match.group(0) if year_match else "N/A"
 
-            rating_el = item.select_one(".rating, .imdb, .vote")
-            rating = rating_el.get_text(strip=True) if rating_el else "N/A"
+            # Quality badge
+            quality_el = item.select_one(".badge-quality-corner")
+            quality = quality_el.get_text(strip=True) if quality_el else ""
 
-            if title:
+            if title and link:
                 seen_urls.add(link)
                 results.append({
                     "title": title,
                     "year": year,
                     "rating": rating,
+                    "quality": quality,
                     "poster": poster,
                     "url": link
-                })
-
-        if not results:
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if BASE_URL not in href or href in seen_urls:
-                    continue
-                if "/movies/" not in href and "/tvshows/" not in href:
-                    continue
-                text = a.get_text(strip=True)
-                if len(text) < 3:
-                    continue
-                seen_urls.add(href)
-                results.append({
-                    "title": text,
-                    "year": "N/A",
-                    "rating": "N/A",
-                    "poster": "",
-                    "url": href
                 })
 
         return jsonify({
@@ -285,6 +151,7 @@ def search():
 
 # ========================================================
 # 2. MOVIE DETAILS ENDPOINT
+# GET /api/movie?url=...
 # ========================================================
 @app.route("/api/movie")
 def movie():
@@ -296,19 +163,23 @@ def movie():
         html = fetch_with_browser(movie_url)
         soup = BeautifulSoup(html, "html.parser")
 
+        # ---- Basic info ----
         title_el = soup.select_one("h1.entry-title, h1")
         title = title_el.get_text(strip=True) if title_el else "N/A"
 
         poster_el = soup.select_one(
-            ".poster img, .entry-content img, article img, .splash img"
+            ".mli-thumb img, .poster img, .entry-content img, article img, .splash img"
         )
         poster = ""
         if poster_el:
             poster = poster_el.get("src") or poster_el.get("data-src") or ""
 
-        desc_el = soup.select_one(".entry-content p, .description, .wp-content p")
+        desc_el = soup.select_one(
+            ".entry-content p, .description, .wp-content p, .item-desc"
+        )
         description = desc_el.get_text(strip=True)[:500] if desc_el else ""
 
+        # ---- Year / Rating ----
         full_text = soup.get_text(" ", strip=True)
         year_match = re.search(r"\b(19|20)\d{2}\b", full_text)
         year = year_match.group(0) if year_match else "N/A"
@@ -316,6 +187,7 @@ def movie():
         rating_match = re.search(r"IMDb[:\s]*([\d.]+)", full_text, re.IGNORECASE)
         rating = rating_match.group(1) if rating_match else "N/A"
 
+        # ---- Download links (ALL qualities) ----
         quality_pattern = re.compile(
             r"(480p|720p|1080p|1440p|2160p|4K|HD|FHD|HDTV|BluRay|WEB-?DL|WEBRip|HDRip|DVDRip|CAM)",
             re.IGNORECASE
