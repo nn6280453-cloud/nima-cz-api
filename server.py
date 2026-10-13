@@ -16,8 +16,8 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------- CONFIG ----------
-BASE_URL = "https://cinesubz.net"     # ✅ Movie pages මෙතන
-SEARCH_URL = "https://cinesubz.lk"    # ✅ Search form එක මෙතන වැඩ කරනවා
+BASE_URL = "https://cinesubz.net"
+SEARCH_URL = "https://cinesubz.lk"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -84,7 +84,6 @@ def search():
         results = []
         seen_urls = set()
 
-        # ✅ CineSubz uses .item-box for each movie card
         for item in soup.select(".item-box"):
             link_el = item.find("a", href=True)
             if not link_el:
@@ -94,7 +93,6 @@ def search():
             if link in seen_urls:
                 continue
 
-            # ✅ Title is inside .item-desc-title or .item-desc-hl
             title_el = (
                 item.select_one(".item-desc-title")
                 or item.select_one(".item-desc-hl")
@@ -102,25 +100,21 @@ def search():
             )
             title = title_el.get_text(strip=True) if title_el else ""
 
-            # ✅ Poster inside .mli-thumb or .thumb img
             img_el = item.select_one(".mli-thumb img, .thumb img, img")
             poster = ""
             if img_el:
                 poster = img_el.get("src") or img_el.get("data-src") or ""
 
-            # ✅ Rating inside .imdb-score / .rating1
             rating_el = item.select_one(".imdb-score, .rating1, .imdb-rating-badge")
             rating = rating_el.get_text(strip=True) if rating_el else "N/A"
             if rating and rating != "N/A":
                 rating = re.sub(r"[^\d.]", "", rating) or "N/A"
 
-            # Year from URL or title
             year_match = re.search(r"\b(19|20)\d{2}\b", link) or re.search(
                 r"\b(19|20)\d{2}\b", title
             )
             year = year_match.group(0) if year_match else "N/A"
 
-            # Quality badge
             quality_el = item.select_one(".badge-quality-corner")
             quality = quality_el.get_text(strip=True) if quality_el else ""
 
@@ -150,7 +144,7 @@ def search():
 
 
 # ========================================================
-# 2. MOVIE DETAILS ENDPOINT
+# 2. MOVIE DETAILS ENDPOINT (FULLY REWRITTEN)
 # GET /api/movie?url=...
 # ========================================================
 @app.route("/api/movie")
@@ -163,70 +157,150 @@ def movie():
         html = fetch_with_browser(movie_url)
         soup = BeautifulSoup(html, "html.parser")
 
-        # ---- Basic info ----
-        title_el = soup.select_one("h1.entry-title, h1")
-        title = title_el.get_text(strip=True) if title_el else "N/A"
+        # ====================================================
+        # ---- 1. TITLE (multiple fallbacks) ----
+        # ====================================================
+        title = "N/A"
 
-        poster_el = soup.select_one(
-            ".mli-thumb img, .poster img, .entry-content img, article img, .splash img"
-        )
+        # Try og:title meta tag first (most reliable)
+        og_title = soup.find("meta", property="og:title")
+        if og_title and og_title.get("content"):
+            title = og_title["content"].strip()
+
+        # Try specific entry-title selectors
+        if title == "N/A" or not title:
+            title_el = (
+                soup.select_one("h1.entry-title")
+                or soup.select_one(".sheader h1")
+                or soup.select_one("article h1")
+                or soup.select_one(".entry-header h1")
+                or soup.select_one(".post-title")
+            )
+            if title_el:
+                title = title_el.get_text(strip=True)
+
+        # Fallback: extract from <title> tag
+        if title == "N/A" or not title:
+            page_title = soup.title.string if soup.title else ""
+            if page_title:
+                title = page_title.split("|")[0].strip()
+
+        # Cleanup title
+        title = re.sub(r"\s*\|.*$", "", title).strip()
+        title = re.sub(r"\s*[-–]\s*CineSubz.*$", "", title, flags=re.IGNORECASE).strip()
+
+        # ====================================================
+        # ---- 2. POSTER ----
+        # ====================================================
         poster = ""
-        if poster_el:
-            poster = poster_el.get("src") or poster_el.get("data-src") or ""
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            poster = og_image["content"].strip()
+        else:
+            poster_el = (
+                soup.select_one(".mli-thumb img")
+                or soup.select_one(".poster img")
+                or soup.select_one("article img")
+            )
+            if poster_el:
+                poster = poster_el.get("src") or poster_el.get("data-src") or ""
 
-        desc_el = soup.select_one(
-            ".entry-content p, .description, .wp-content p, .item-desc"
+        # ====================================================
+        # ---- 3. DESCRIPTION ----
+        # ====================================================
+        description = ""
+        og_desc = soup.find("meta", property="og:description")
+        if og_desc and og_desc.get("content"):
+            description = og_desc["content"].strip()[:500]
+        else:
+            desc_el = soup.select_one(
+                ".entry-content p, .description, .wp-content p, .item-desc"
+            )
+            if desc_el:
+                description = desc_el.get_text(strip=True)[:500]
+
+        # ====================================================
+        # ---- 4. YEAR ----
+        # ====================================================
+        year_match = (
+            re.search(r"\b(19|20)\d{2}\b", movie_url)
+            or re.search(r"\b(19|20)\d{2}\b", title)
         )
-        description = desc_el.get_text(strip=True)[:500] if desc_el else ""
-
-        # ---- Year / Rating ----
-        full_text = soup.get_text(" ", strip=True)
-        year_match = re.search(r"\b(19|20)\d{2}\b", full_text)
         year = year_match.group(0) if year_match else "N/A"
 
-        rating_match = re.search(r"IMDb[:\s]*([\d.]+)", full_text, re.IGNORECASE)
-        rating = rating_match.group(1) if rating_match else "N/A"
-
-        # ---- Download links (ALL qualities) ----
-        quality_pattern = re.compile(
-            r"(480p|720p|1080p|1440p|2160p|4K|HD|FHD|HDTV|BluRay|WEB-?DL|WEBRip|HDRip|DVDRip|CAM)",
-            re.IGNORECASE
+        # ====================================================
+        # ---- 5. RATING (strict - only IMDb score) ----
+        # ====================================================
+        rating = "N/A"
+        rating_el = soup.select_one(
+            ".imdb-score, .imdb-rating-badge .score, .rating1 .score"
         )
-        download_hosts = re.compile(
-            r"(download|drive\.google|mega\.nz|pixeldrain|hubcloud|workers\.dev|gdtot|filepress|filebee|streamtape|dood)",
-            re.IGNORECASE
-        )
+        if rating_el:
+            rating_text = rating_el.get_text(strip=True)
+            rating_match = re.search(r"(\d+\.\d+)", rating_text)
+            if rating_match:
+                rating = rating_match.group(1)
 
+        if rating == "N/A":
+            # Fallback: search for "IMDb: X.X" pattern
+            full_text = soup.get_text(" ", strip=True)
+            rating_match = re.search(r"IMDb[:\s]*([\d]+\.[\d]+)", full_text)
+            if rating_match:
+                rating = rating_match.group(1)
+
+        # ====================================================
+        # ---- 6. DOWNLOAD LINKS (only /zt-links/) ----
+        # ====================================================
         download_links = []
         seen = set()
 
         for a in soup.find_all("a", href=True):
             href = a["href"]
             label = a.get_text(" ", strip=True)
-            if not href or href in seen:
+
+            # ✅ Only accept /zt-links/ URLs (CineSubz download pages)
+            if "/zt-links/" not in href:
+                continue
+            if href in seen:
                 continue
 
-            is_quality = (
-                quality_pattern.search(label)
-                or quality_pattern.search(href)
-                or download_hosts.search(href)
+            seen.add(href)
+
+            # Extract resolution (480p, 720p, 1080p, 2160p, 4K)
+            res_match = re.search(
+                r"\b(\d{3,4}p|4K|2160p)\b", label, re.IGNORECASE
             )
+            if res_match:
+                quality = res_match.group(0).upper()
+            else:
+                # Fallback to source type
+                src_match = re.search(
+                    r"\b(BluRay|WEB-?DL|WEBRip|HDRip|HDTV|DVDRip|CAM|HD|FHD)\b",
+                    label, re.IGNORECASE
+                )
+                quality = src_match.group(0).upper() if src_match else "Download"
 
-            if is_quality:
-                seen.add(href)
-                qmatch = quality_pattern.search(label) or quality_pattern.search(href)
-                quality = qmatch.group(0).upper() if qmatch else "Download"
-                quality = quality.replace("WEB-DL", "WEB-DL").replace("WEBRIP", "WEBRip")
+            # Extract file size (e.g., "1.6 GB", "700 MB")
+            size_match = re.search(r"(\d+(?:\.\d+)?\s*(?:MB|GB|KB))", label, re.IGNORECASE)
+            size = size_match.group(1).strip() if size_match else ""
 
-                download_links.append({
-                    "quality": quality,
-                    "label": label[:80] or quality,
-                    "url": href
-                })
+            download_links.append({
+                "quality": quality,
+                "size": size,
+                "label": label[:120] or quality,
+                "url": href
+            })
 
-        order = {"4K": 0, "2160P": 1, "1440P": 2, "1080P": 3, "720P": 4, "480P": 5}
+        # Sort: 4K → 2160p → 1080p → 720p → 480p → other
+        order = {
+            "4K": 0, "2160P": 1, "1440P": 2, "1080P": 3,
+            "720P": 4, "480P": 5, "360P": 6
+        }
         download_links.sort(key=lambda x: order.get(x["quality"], 99))
 
+        # ====================================================
+        # ---- RESPONSE ----
+        # ====================================================
         return jsonify({
             "success": True,
             "data": {
