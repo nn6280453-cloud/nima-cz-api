@@ -42,7 +42,7 @@ def fetch_with_browser(url):
         )
         page = browser.new_page(user_agent=HEADERS["User-Agent"])
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(4000)   # wait for JS to render
+        page.wait_for_timeout(4000)
         html = page.content()
         browser.close()
         return html
@@ -61,7 +61,8 @@ def home():
         "endpoints": {
             "search": "/api/search?q=movie+name",
             "movie": "/api/movie?url=movie_page_url",
-            "debug": "/debug?q=avatar"
+            "debug": "/debug?q=avatar",
+            "debughtml": "/debughtml?q=avatar"
         }
     })
 
@@ -73,7 +74,6 @@ def home():
 def debug():
     query = request.args.get("q", "avatar")
     try:
-        # Try multiple search URL patterns
         test_urls = [
             f"{BASE_URL}/?s={quote(query)}",
             f"{BASE_URL}/search?q={quote(query)}",
@@ -88,7 +88,6 @@ def debug():
                 html = fetch_with_browser(url)
                 soup = BeautifulSoup(html, "html.parser")
 
-                # Count all links that look like movie URLs
                 movie_links = []
                 for a in soup.find_all("a", href=True):
                     href = a["href"]
@@ -103,10 +102,7 @@ def debug():
                                 "url": href[:120]
                             })
 
-                # Get page title
                 page_title = soup.title.string if soup.title else "no title"
-
-                # Count divs with common movie-item classes
                 item_count = len(soup.select(
                     ".movie-item, .item, .card, .module-item, .poster, article"
                 ))
@@ -132,6 +128,71 @@ def debug():
 
 
 # ========================================================
+# DEBUG HTML ENDPOINT - Shows actual HTML classes
+# ========================================================
+@app.route("/debughtml")
+def debughtml():
+    query = request.args.get("q", "avatar")
+    try:
+        search_url = f"{BASE_URL}/?s={quote(query)}"
+        html = fetch_with_browser(search_url)
+        soup = BeautifulSoup(html, "html.parser")
+
+        # ---- 1. All unique CSS class names ----
+        class_counter = {}
+        for tag in soup.find_all(class_=True):
+            for cls in tag.get("class", []):
+                class_counter[cls] = class_counter.get(cls, 0) + 1
+
+        top_classes = sorted(
+            class_counter.items(), key=lambda x: -x[1]
+        )[:40]
+
+        # ---- 2. All <a> links with movie-like hrefs ----
+        movie_links = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if any(x in href.lower() for x in [
+                "/movie", "/tv-show", "/tvshow", "/series", "/watch", "/title"
+            ]):
+                if href.rstrip("/") in [
+                    f"{BASE_URL}/movies",
+                    f"{BASE_URL}/tvshows",
+                    f"{BASE_URL}/movies/",
+                    f"{BASE_URL}/tvshows/",
+                ]:
+                    continue
+                movie_links.append({
+                    "text": a.get_text(strip=True)[:80],
+                    "href": href,
+                    "parent_class": " ".join(a.parent.get("class", [])) if a.parent else "",
+                })
+
+        # ---- 3. Find elements with 'poster' or 'thumb' in class ----
+        poster_elements = []
+        for el in soup.find_all(class_=re.compile("poster|thumb|card|item|module", re.IGNORECASE)):
+            poster_elements.append({
+                "tag": el.name,
+                "class": " ".join(el.get("class", [])),
+                "snippet": str(el)[:200],
+            })
+
+        return jsonify({
+            "query": query,
+            "search_url": search_url,
+            "content_length": len(html),
+            "top_classes": top_classes,
+            "movie_links_count": len(movie_links),
+            "movie_links": movie_links[:15],
+            "poster_elements_count": len(poster_elements),
+            "poster_elements": poster_elements[:10],
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ========================================================
 # 1. SEARCH ENDPOINT
 # GET /api/search?q=avatar
 # ========================================================
@@ -149,7 +210,6 @@ def search():
         results = []
         seen_urls = set()
 
-        # CineSubz uses .module-item or .item-box
         for item in soup.select(".module-item, .item-box, .result-item, .movie-item, .display-item"):
             link_el = item.find("a", href=True)
             if not link_el:
@@ -190,7 +250,6 @@ def search():
                     "url": link
                 })
 
-        # Fallback
         if not results:
             for a in soup.find_all("a", href=True):
                 href = a["href"]
