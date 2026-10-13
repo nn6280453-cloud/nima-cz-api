@@ -13,7 +13,6 @@ from collections import defaultdict
 import re
 import os
 import time
-import hashlib
 from urllib.parse import quote, urljoin
 
 app = Flask(__name__)
@@ -24,11 +23,10 @@ CORS(app)
 # ========================================================
 BASE_URL = "https://sinhalasub.lk"
 
-# Premium API Keys (ඔබට කැමති තරම් keys add කරන්න)
 API_KEYS = {
     "nima_premium_88c183708c1971f39f2d2a25fbee7d8f": {
         "name": "Nima Premium",
-        "rate_limit": 60,      # requests per minute
+        "rate_limit": 60,
         "daily_limit": 5000,
         "tier": "premium"
     },
@@ -50,15 +48,12 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
 }
 
-# ========================================================
-# CACHE + RATE LIMIT STORAGE
-# ========================================================
-cache_store = {}                       # key -> { data, at }
-rate_store = defaultdict(list)         # api_key -> [timestamps]
+cache_store = {}
+rate_store = defaultdict(list)
 daily_store = defaultdict(lambda: {"count": 0, "date": ""})
 
-CACHE_TTL = 300                        # 5 minutes
-RATE_WINDOW = 60                       # 1 minute
+CACHE_TTL = 300
+RATE_WINDOW = 60
 
 
 def cache_get(key):
@@ -76,10 +71,8 @@ def cache_set(key, data):
 
 
 def check_rate_limit(api_key, limit):
-    """True if allowed, False if exceeded."""
     now = time.time()
     timestamps = rate_store[api_key]
-    # Remove old entries
     rate_store[api_key] = [t for t in timestamps if now - t < RATE_WINDOW]
     if len(rate_store[api_key]) >= limit:
         return False
@@ -99,9 +92,6 @@ def check_daily_limit(api_key, limit):
     return True
 
 
-# ========================================================
-# AUTH DECORATOR
-# ========================================================
 def require_api_key(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -122,7 +112,6 @@ def require_api_key(f):
 
         key_info = API_KEYS[api_key]
 
-        # Rate limit check
         if not check_rate_limit(api_key, key_info["rate_limit"]):
             return jsonify({
                 "success": False,
@@ -130,7 +119,6 @@ def require_api_key(f):
                 "limit": f"{key_info['rate_limit']} requests/minute"
             }), 429
 
-        # Daily limit check
         if not check_daily_limit(api_key, key_info["daily_limit"]):
             return jsonify({
                 "success": False,
@@ -142,9 +130,6 @@ def require_api_key(f):
     return wrapper
 
 
-# ========================================================
-# BROWSER FETCH
-# ========================================================
 def fetch_with_browser(url, wait_ms=4000):
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -181,9 +166,10 @@ def home():
         "endpoints": {
             "search": "/api/search?q=movie+name&api_key=YOUR_KEY",
             "movie": "/api/movie?url=movie_page_url&api_key=YOUR_KEY",
+            "debug": "/api/debug?url=movie_page_url",
             "stats": "/api/stats?api_key=YOUR_KEY"
         },
-        "note": "All endpoints require valid API key"
+        "note": "All endpoints require valid API key (except /api/debug)"
     })
 
 
@@ -220,7 +206,6 @@ def search():
     if not query:
         return jsonify({"success": False, "error": 'Parameter "q" is required'}), 400
 
-    # Cache check
     cache_key = f"search:{query.lower()}"
     cached = cache_get(cache_key)
     if cached:
@@ -235,7 +220,6 @@ def search():
         results = []
         seen_urls = set()
 
-        # Try multiple selector patterns
         selectors = [
             "article.item",
             "article",
@@ -389,20 +373,18 @@ def movie():
                 rating = m.group(1)
 
         # Download links
-        # Sinhalasub typically uses <a href="...drive.google.com/..."> or similar
         download_links = []
         seen = set()
 
         link_pattern = re.compile(
             r"(drive\.google|mega\.nz|pixeldrain|hubcloud|workers\.dev|"
             r"gdflix|katdrive|kolop|1fichier|mediafire|dropbox|"
-            r"sinhalasub\.lk/dl|sinhalasub\.net/dl|\.mp4|\.mkv)",
+            r"sinhalasub\.lk/links|sinhalasub\.net/links|\.mp4|\.mkv)",
             re.IGNORECASE
         )
         quality_re = re.compile(r"\b(\d{3,4}p|4K|2160p|720p|1080p|480p)\b", re.IGNORECASE)
         size_re = re.compile(r"(\d+(?:\.\d+)?\s*(?:MB|GB|KB))", re.IGNORECASE)
 
-        # Look for buttons with download classes
         candidate_anchors = (
             soup.select("a.button, a.dl-btn, a.download, .dl_links a, .download-links a")
             or soup.find_all("a", href=True)
@@ -454,6 +436,80 @@ def movie():
         cache_set(cache_key, response)
 
         return jsonify(response)
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ========================================================
+# 3. DEBUG ENDPOINT — Analyze HTML structure (no API key)
+# ========================================================
+@app.route("/api/debug")
+def debug():
+    url = request.args.get("url")
+    if not url:
+        return jsonify({"error": 'Parameter "url" is required'}), 400
+
+    try:
+        html = fetch_with_browser(url)
+        soup = BeautifulSoup(html, "html.parser")
+
+        # 1. Page title (from meta + h1)
+        meta_title = ""
+        og = soup.find("meta", property="og:title")
+        if og and og.get("content"):
+            meta_title = og["content"].strip()
+
+        h1_title = ""
+        h1_el = soup.select_one("h1.entry-title, h1")
+        if h1_el:
+            h1_title = h1_el.get_text(strip=True)
+
+        # 2. All links with download-like patterns
+        candidate_links = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            label = a.get_text(" ", strip=True)
+            parent_class = " ".join(a.parent.get("class", [])) if a.parent else ""
+            own_class = " ".join(a.get("class", []))
+
+            if any(x in href for x in ["/links/", "/dl/", "download", "pixeldrain", "drive.google", "mega.nz", ".mp4", ".mkv"]):
+                candidate_links.append({
+                    "text": label[:100],
+                    "href": href[:150],
+                    "class": own_class,
+                    "parent_class": parent_class[:80]
+                })
+
+        # 3. All button-like elements
+        buttons = []
+        for el in soup.select(".button, .btn, a.button, a.btn, .download-button, .dl-btn"):
+            buttons.append({
+                "tag": el.name,
+                "text": el.get_text(" ", strip=True)[:80],
+                "href": (el.get("href") or "")[:150],
+                "class": " ".join(el.get("class", []))
+            })
+
+        # 4. All unique classes (top 30)
+        class_counter = {}
+        for tag in soup.find_all(class_=True):
+            for cls in tag.get("class", []):
+                class_counter[cls] = class_counter.get(cls, 0) + 1
+        top_classes = sorted(class_counter.items(), key=lambda x: -x[1])[:30]
+
+        return jsonify({
+            "success": True,
+            "url": url,
+            "page_title_meta": meta_title,
+            "page_title_h1": h1_title,
+            "page_title_tag": soup.title.string if soup.title else "",
+            "candidate_links_count": len(candidate_links),
+            "candidate_links": candidate_links[:15],
+            "buttons_count": len(buttons),
+            "buttons": buttons[:10],
+            "top_classes": top_classes
+        })
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
