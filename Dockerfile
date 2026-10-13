@@ -32,14 +32,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright Chromium browser (only, no deps - we already installed them)
+# Install Playwright Chromium browser
 RUN playwright install chromium
 
 # Copy app code
 COPY . .
 
-# Expose port
-EXPOSE 3000
+# ✅ Railway assigns a dynamic PORT — read it at runtime
+ENV PORT=3000
 
-# Start command
-CMD ["gunicorn", "server:app", "--bind", "0.0.0.0:3000", "--timeout", "120"]
+# Use shell form so $PORT expands correctly
+CMD gunicorn server:app --bind 0.0.0.0:$PORT --timeout 180 --workers 1 --threads 4 --worker-class gthread
