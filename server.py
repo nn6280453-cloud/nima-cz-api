@@ -16,7 +16,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------- CONFIG ----------
-BASE_URL = "https://cinesubz.lk"   # ✅ Updated domain
+BASE_URL = "https://cinesubz.lk"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -36,11 +36,13 @@ def fetch_with_browser(url):
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
+                "--single-process",
+                "--no-zygote",
             ]
         )
         page = browser.new_page(user_agent=HEADERS["User-Agent"])
-        page.goto(url, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(3000)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(4000)   # wait for JS to render
         html = page.content()
         browser.close()
         return html
