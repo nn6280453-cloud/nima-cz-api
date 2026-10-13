@@ -60,9 +60,75 @@ def home():
         "engine": "playwright",
         "endpoints": {
             "search": "/api/search?q=movie+name",
-            "movie": "/api/movie?url=movie_page_url"
+            "movie": "/api/movie?url=movie_page_url",
+            "debug": "/debug?q=avatar"
         }
     })
+
+
+# ========================================================
+# DEBUG ENDPOINT - Remove after testing
+# ========================================================
+@app.route("/debug")
+def debug():
+    query = request.args.get("q", "avatar")
+    try:
+        # Try multiple search URL patterns
+        test_urls = [
+            f"{BASE_URL}/?s={quote(query)}",
+            f"{BASE_URL}/search?q={quote(query)}",
+            f"{BASE_URL}/search/{quote(query)}",
+            f"{BASE_URL}/find/?q={quote(query)}",
+            f"{BASE_URL}/?search={quote(query)}",
+        ]
+
+        results = []
+        for url in test_urls:
+            try:
+                html = fetch_with_browser(url)
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Count all links that look like movie URLs
+                movie_links = []
+                for a in soup.find_all("a", href=True):
+                    href = a["href"]
+                    if any(x in href.lower() for x in [
+                        "/movie/", "/movies/", "/tvshow/", "/tvshows/",
+                        "/watch/", "/title/", "/series/"
+                    ]):
+                        text = a.get_text(strip=True)
+                        if text and len(text) > 2:
+                            movie_links.append({
+                                "title": text[:60],
+                                "url": href[:120]
+                            })
+
+                # Get page title
+                page_title = soup.title.string if soup.title else "no title"
+
+                # Count divs with common movie-item classes
+                item_count = len(soup.select(
+                    ".movie-item, .item, .card, .module-item, .poster, article"
+                ))
+
+                results.append({
+                    "url": url,
+                    "page_title": page_title,
+                    "movie_links_found": len(movie_links),
+                    "sample_links": movie_links[:5],
+                    "item_count": item_count,
+                    "content_length": len(html),
+                })
+            except Exception as e:
+                results.append({"url": url, "error": str(e)})
+
+        return jsonify({
+            "query": query,
+            "results": results
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ========================================================
