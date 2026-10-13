@@ -1,36 +1,16 @@
 # ========================================================
 # Nima CZ API - CineSubz Scraper (Python + Playwright)
 # Author: Nima
-# Deploy: Railway
+# Deploy: Railway (Docker)
 # ========================================================
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 import re
 import os
-import subprocess
-import sys
 from urllib.parse import quote
-
-# ---------- AUTO-INSTALL PLAYWRIGHT BROWSER AT STARTUP ----------
-def install_playwright_browser():
-    """Download Chromium browser for Playwright on startup."""
-    try:
-        print("🔧 Installing Playwright Chromium browser...")
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            check=False,
-            timeout=600
-        )
-        print("✅ Playwright browser installed.")
-    except Exception as e:
-        print(f"⚠️ Playwright install warning: {e}")
-
-install_playwright_browser()
-
-# Now import playwright AFTER browser install
-from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 CORS(app)
