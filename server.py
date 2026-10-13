@@ -61,14 +61,14 @@ def home():
         "engine": "playwright",
         "endpoints": {
             "search": "/api/search?q=movie+name",
-            "movie": "/api/movie?url=movie_page_url"
+            "movie": "/api/movie?url=movie_page_url",
+            "resolve": "/api/resolve?url=zt_links_url"
         }
     })
 
 
 # ========================================================
 # 1. SEARCH ENDPOINT
-# GET /api/search?q=avatar
 # ========================================================
 @app.route("/api/search")
 def search():
@@ -144,8 +144,7 @@ def search():
 
 
 # ========================================================
-# 2. MOVIE DETAILS ENDPOINT (FULLY REWRITTEN)
-# GET /api/movie?url=...
+# 2. MOVIE DETAILS ENDPOINT
 # ========================================================
 @app.route("/api/movie")
 def movie():
@@ -157,17 +156,12 @@ def movie():
         html = fetch_with_browser(movie_url)
         soup = BeautifulSoup(html, "html.parser")
 
-        # ====================================================
-        # ---- 1. TITLE (multiple fallbacks) ----
-        # ====================================================
+        # Title
         title = "N/A"
-
-        # Try og:title meta tag first (most reliable)
         og_title = soup.find("meta", property="og:title")
         if og_title and og_title.get("content"):
             title = og_title["content"].strip()
 
-        # Try specific entry-title selectors
         if title == "N/A" or not title:
             title_el = (
                 soup.select_one("h1.entry-title")
@@ -179,19 +173,15 @@ def movie():
             if title_el:
                 title = title_el.get_text(strip=True)
 
-        # Fallback: extract from <title> tag
         if title == "N/A" or not title:
             page_title = soup.title.string if soup.title else ""
             if page_title:
                 title = page_title.split("|")[0].strip()
 
-        # Cleanup title
         title = re.sub(r"\s*\|.*$", "", title).strip()
         title = re.sub(r"\s*[-–]\s*CineSubz.*$", "", title, flags=re.IGNORECASE).strip()
 
-        # ====================================================
-        # ---- 2. POSTER ----
-        # ====================================================
+        # Poster
         poster = ""
         og_image = soup.find("meta", property="og:image")
         if og_image and og_image.get("content"):
@@ -205,9 +195,7 @@ def movie():
             if poster_el:
                 poster = poster_el.get("src") or poster_el.get("data-src") or ""
 
-        # ====================================================
-        # ---- 3. DESCRIPTION ----
-        # ====================================================
+        # Description
         description = ""
         og_desc = soup.find("meta", property="og:description")
         if og_desc and og_desc.get("content"):
@@ -219,18 +207,14 @@ def movie():
             if desc_el:
                 description = desc_el.get_text(strip=True)[:500]
 
-        # ====================================================
-        # ---- 4. YEAR ----
-        # ====================================================
+        # Year
         year_match = (
             re.search(r"\b(19|20)\d{2}\b", movie_url)
             or re.search(r"\b(19|20)\d{2}\b", title)
         )
         year = year_match.group(0) if year_match else "N/A"
 
-        # ====================================================
-        # ---- 5. RATING (strict - only IMDb score) ----
-        # ====================================================
+        # Rating
         rating = "N/A"
         rating_el = soup.select_one(
             ".imdb-score, .imdb-rating-badge .score, .rating1 .score"
@@ -242,15 +226,12 @@ def movie():
                 rating = rating_match.group(1)
 
         if rating == "N/A":
-            # Fallback: search for "IMDb: X.X" pattern
             full_text = soup.get_text(" ", strip=True)
             rating_match = re.search(r"IMDb[:\s]*([\d]+\.[\d]+)", full_text)
             if rating_match:
                 rating = rating_match.group(1)
 
-        # ====================================================
-        # ---- 6. DOWNLOAD LINKS (only /zt-links/) ----
-        # ====================================================
+        # Download links (only /zt-links/)
         download_links = []
         seen = set()
 
@@ -258,7 +239,6 @@ def movie():
             href = a["href"]
             label = a.get_text(" ", strip=True)
 
-            # ✅ Only accept /zt-links/ URLs (CineSubz download pages)
             if "/zt-links/" not in href:
                 continue
             if href in seen:
@@ -266,21 +246,16 @@ def movie():
 
             seen.add(href)
 
-            # Extract resolution (480p, 720p, 1080p, 2160p, 4K)
-            res_match = re.search(
-                r"\b(\d{3,4}p|4K|2160p)\b", label, re.IGNORECASE
-            )
+            res_match = re.search(r"\b(\d{3,4}p|4K|2160p)\b", label, re.IGNORECASE)
             if res_match:
                 quality = res_match.group(0).upper()
             else:
-                # Fallback to source type
                 src_match = re.search(
                     r"\b(BluRay|WEB-?DL|WEBRip|HDRip|HDTV|DVDRip|CAM|HD|FHD)\b",
                     label, re.IGNORECASE
                 )
                 quality = src_match.group(0).upper() if src_match else "Download"
 
-            # Extract file size (e.g., "1.6 GB", "700 MB")
             size_match = re.search(r"(\d+(?:\.\d+)?\s*(?:MB|GB|KB))", label, re.IGNORECASE)
             size = size_match.group(1).strip() if size_match else ""
 
@@ -291,16 +266,12 @@ def movie():
                 "url": href
             })
 
-        # Sort: 4K → 2160p → 1080p → 720p → 480p → other
         order = {
             "4K": 0, "2160P": 1, "1440P": 2, "1080P": 3,
             "720P": 4, "480P": 5, "360P": 6
         }
         download_links.sort(key=lambda x: order.get(x["quality"], 99))
 
-        # ====================================================
-        # ---- RESPONSE ----
-        # ====================================================
         return jsonify({
             "success": True,
             "data": {
@@ -311,6 +282,87 @@ def movie():
                 "description": description,
                 "totalLinks": len(download_links),
                 "downloadLinks": download_links
+            }
+        })
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ========================================================
+# 3. RESOLVE ENDPOINT (NEW)
+# GET /api/resolve?url=https://cinesubz.net/zt-links/xxx/
+# ========================================================
+@app.route("/api/resolve")
+def resolve():
+    source_url = request.args.get("url")
+    if not source_url:
+        return jsonify({"success": False, "error": 'Parameter "url" is required'}), 400
+
+    try:
+        html = fetch_with_browser(source_url)
+        soup = BeautifulSoup(html, "html.parser")
+
+        host_pattern = re.compile(
+            r"(drive\.google|mega\.nz|pixeldrain|hubcloud|workers\.dev|"
+            r"gdtot|filepress|filebee|streamtape|dood|1fichier|mediafire|"
+            r"dropbox|gdflix|katdrive|kolop|sonic-cloud|fastdl|"
+            r"gdsharing|hubdrive|sfile|shareus|gdrive|gdlink)",
+            re.IGNORECASE
+        )
+        ext_pattern = re.compile(r"\.(mkv|mp4|avi|mov|zip|rar|7z|m4v|webm)(\?|$)", re.IGNORECASE)
+
+        hosts = []
+        seen = set()
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            label = a.get_text(" ", strip=True)
+
+            if not href or href in seen:
+                continue
+            if href.startswith("#") or href.startswith("javascript:"):
+                continue
+            if "cinesubz" in href and "/zt-links/" not in href:
+                continue
+
+            is_host = host_pattern.search(href) or host_pattern.search(label)
+            is_direct = ext_pattern.search(href)
+
+            if is_host or is_direct:
+                seen.add(href)
+                hosts.append({
+                    "label": label[:100] if label else "Download",
+                    "url": href
+                })
+
+        # Fallback: any external link
+        if not hosts:
+            for a in soup.find_all("a", href=True):
+                href = a["href"].strip()
+                if not href.startswith("http"):
+                    continue
+                if "cinesubz" in href:
+                    continue
+                if href in seen:
+                    continue
+                seen.add(href)
+                hosts.append({
+                    "label": a.get_text(" ", strip=True)[:100] or "Link",
+                    "url": href
+                })
+
+        is_blocked = "Just a moment" in html or "cf-browser-verification" in html
+        page_title = soup.title.string.strip() if soup.title else ""
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "source": source_url,
+                "pageTitle": page_title,
+                "isBlocked": is_blocked,
+                "totalHosts": len(hosts),
+                "hosts": hosts
             }
         })
 
