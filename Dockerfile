@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
     fonts-liberation \
+    fonts-unifont \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -31,9 +32,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright Chromium browser
+# Install Playwright Chromium browser (only, no deps - we already installed them)
 RUN playwright install chromium
-RUN playwright install-deps chromium
 
 # Copy app code
 COPY . .
